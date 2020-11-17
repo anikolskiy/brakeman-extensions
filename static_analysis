@@ -1,0 +1,91 @@
+#!/usr/bin/env ruby
+
+def block_to_hash(block)
+  {}.tap do |result|
+    block.each do |line|
+      key   = line.sub(/^([^:]+):.*/, '\1')
+      value = line.sub(/^[^:]+:\s+(.*)/, '\1')
+
+      result[key] = value
+    end
+  end
+end
+
+def hash_to_string(hash)
+  hash.map { |k, v| "#{k}: #{v}" }.join("\n")
+end
+
+def extract_block(result, block_title, remove_empty_lines = true)
+  block_start = result.index("== #{block_title} ==")
+
+  return [] unless block_start
+
+  block_end = result[(block_start + 1)..-1].index { |l| l.start_with?('== ') }
+  block_end += block_start if block_end
+
+  r = result[(block_start + 1)..(block_end || -1)]
+
+  if remove_empty_lines
+    r.select { |l| l.length > 0 }
+  else
+    r
+  end
+end
+
+def extract_warnings(result, block_title)
+  block = extract_block(result, block_title, false)
+  warning_blocks = block.join("\n").split("\n\n")
+  warning_blocks.reject! { |wb| wb == 'No warnings found' }
+  warning_blocks.map { |wb| wb.split("\n").select { |l| l.length > 0 } }.map { |w| block_to_hash(w) }
+end
+
+result = `brakeman`.split("\n")
+
+brakeman_report = block_to_hash(extract_block(result, 'Brakeman Report'))
+overview        = block_to_hash(extract_block(result, 'Overview'))
+errors          = extract_warnings(result, 'Errors')
+warnings        = extract_warnings(result, 'Warnings')
+
+app_root = brakeman_report['Application Path']
+
+warnings.reject! do |warning|
+  path = File.join(app_root, warning['File'])
+  lines = File.read(path).split("\n")
+  lines[warning['Line'].to_i - 1] =~ %r{#\s*brakeman:disable\s*$}
+end
+
+overview['Security Warnings'] = warnings.length
+warning_types = {}
+
+warnings.each do |warning|
+  category = warning['Category']
+  warning_types[category] ||= 0
+  warning_types[category] += 1
+end
+
+puts "== Brakeman Report ==\n\n"
+puts hash_to_string(brakeman_report)
+puts
+
+puts "== Overview ==\n\n"
+puts hash_to_string(overview)
+puts
+
+puts "== Warning Types ==\n\n"
+puts hash_to_string(warning_types)
+puts if warning_types.any?
+
+if errors.length > 0
+  puts "== Errors ==\n\n"
+  puts errors.map { |e| hash_to_string(e) }.join("\n\n")
+  puts
+end
+
+if warnings.length > 0
+  puts '== Warnings =='
+  puts warnings.map { |w| hash_to_string(w) }.join("\n\n")
+else
+  puts 'No warnings found'
+end
+
+exit(1) if warnings.length > 0
